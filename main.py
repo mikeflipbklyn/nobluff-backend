@@ -54,6 +54,7 @@ class Verdict(str, Enum):
     """Internal verdict enum - values match iOS VerdictType raw values."""
     BLUFF = "bluff"
     NO_BLUFF = "no_bluff"
+    REVERSE_BLUFF = "reverse_bluff"
     INCONCLUSIVE = "inconclusive"
 
 @dataclass
@@ -90,30 +91,41 @@ class GeminiService:
         model = model_name or GEMINI_MODEL_NAME
         model_id = model if model.startswith("models/") else f"models/{model}"
         
-        # Entertainment-focused prompt (avoid overclaiming accuracy)
+        # Entertainment-focused prompt with multi-speaker handling
         system_instruction = (
             "You are analyzing audio for an entertainment lie detection app. "
             "Listen for vocal patterns that might suggest stress or hesitation. "
-            "This is for fun - not forensic use. Be decisive but fair."
+            "This is for fun - not forensic use. Be decisive but fair. "
+            "IMPORTANT: If you hear multiple voices, focus on the PRIMARY SUBJECT - "
+            "the person being questioned or the loudest/clearest voice. "
+            "Ignore the Interrogator's voice except as context."
         )
 
         prompt = """
-        Analyze this audio clip for signs the speaker might be bluffing.
+        Analyze this audio clip for signs of deception.
         
-        Look for:
-        - Vocal hesitations or unusual pauses
-        - Changes in pitch or speaking pace
-        - Hedging language or excessive qualifiers
+        SPEAKER RULES:
+        - If multiple voices: analyze the PRIMARY SUBJECT (being questioned, loudest, clearest)
+        - Ignore the Interrogator unless they show signs of deception themselves
+        - If vocal overlap makes isolation impossible: return inconclusive
         
-        If speech sounds natural and confident: no_bluff
-        If speech sounds stressed or evasive: bluff
-        If audio is unclear or too short: inconclusive
+        DETECTION SIGNALS:
+        - Vocal hesitations, micro-tremors, pitch shifts
+        - Changes in speaking pace or rhythm
+        - Hedging language, excessive qualifiers
+        - Defensive tone when not warranted
+        
+        VERDICTS:
+        - "no_bluff": Speech sounds natural, confident, consistent
+        - "bluff": Speech shows stress markers, evasion, or deception patterns
+        - "reverse_bluff": RARE - Use ONLY if the Interrogator (questioner) shows clear deception while Subject is truthful. This is a fun "gotcha" moment.
+        - "inconclusive": Audio unclear, too short, or voices too overlapped
         
         Respond with ONLY this JSON (no markdown):
         {
-          "verdict": "bluff" or "no_bluff" or "inconclusive",
+          "verdict": "bluff" or "no_bluff" or "reverse_bluff" or "inconclusive",
           "confidence": 0.0 to 1.0,
-          "analysis": "Brief explanation (max 20 words)"
+          "analysis": "Brief explanation (max 25 words)"
         }
         """
 
@@ -152,6 +164,8 @@ class GeminiService:
                 verdict = Verdict.BLUFF
             elif verdict_str in ("no_bluff", "nobluff", "no bluff", "no-bluff"):
                 verdict = Verdict.NO_BLUFF
+            elif verdict_str in ("reverse_bluff", "reversebluff", "reverse bluff"):
+                verdict = Verdict.REVERSE_BLUFF
             else:
                 verdict = Verdict.INCONCLUSIVE
 
