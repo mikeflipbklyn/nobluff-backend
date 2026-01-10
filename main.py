@@ -5,9 +5,9 @@ Production-ready FastAPI server with AI failover pattern.
 Deployed on Render.com.
 
 UPDATES:
-- Added "INCONCLUSIVE" state for silence/noise.
-- Enhanced System Prompt for "Forensic" accuracy.
-- Enforced Native JSON response mode for Gemini.
+- Fixed "Short Clip" rejection (3-4s is now valid).
+- Lowered byte/transcript thresholds.
+- Updated Prompt to analyze single-word answers.
 """
 
 from __future__ import annotations
@@ -39,9 +39,8 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Use Gemini 1.5 Flash for speed, or Pro for max intelligence
-# Flash is recommended for real-time "viral" feel.
-GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "models/gemini-1.5-flash")
+# Using specific version 002 for stability
+GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-002")
 
 # Logging configuration
 logging.basicConfig(
@@ -51,13 +50,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("nobluff")
 
-# Shared HTTP Client (Connection Pooling)
+# Shared HTTP Client
 http_client: Optional[httpx.AsyncClient] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client
-    http_client = httpx.AsyncClient(timeout=60.0) # Increased timeout for deep analysis
+    http_client = httpx.AsyncClient(timeout=60.0)
     logger.info("Global HTTP Client Initialized")
     yield
     if http_client:
@@ -71,18 +70,16 @@ async def lifespan(app: FastAPI):
 class Verdict(str, Enum):
     BLUFF = "BLUFF"
     NO_BLUFF = "NO BLUFF"
-    INCONCLUSIVE = "INCONCLUSIVE" # New state for silence/noise
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 @dataclass
 class AnalysisResult:
-    """Internal result from AI provider analysis."""
     verdict: Verdict
     confidence: float
     reason: str
     provider: str
 
 class AnalysisResponse(BaseModel):
-    """API response schema."""
     verdict: str = Field(..., description="BLUFF, NO BLUFF, or INCONCLUSIVE")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score 0-1")
     reason: str = Field(..., description="Punchy explanation for UI")
@@ -104,44 +101,37 @@ class AIProviderError(Exception):
         super().__init__(f"[{provider}] {message}")
 
 class AIProvider(ABC):
-    
     @property
     @abstractmethod
-    def name(self) -> str:
-        pass
+    def name(self) -> str: pass
     
     @abstractmethod
-    async def analyze_audio(self, audio_data: bytes, mime_type: str) -> AnalysisResult:
-        pass
+    async def analyze_audio(self, audio_data: bytes, mime_type: str) -> AnalysisResult: pass
     
     def _build_analysis_prompt(self) -> str:
         """
-        ADVANCED PROMPT v2:
-        - Detects Silence/Noise
-        - Focuses on Acoustic Biomarkers (Pitch, Jitter, Latency)
+        UPDATED PROMPT:
+        - Explicitly allows short clips.
+        - Focuses on micro-tremors in single words.
         """
         return """You are a Forensic Psycho-Acoustic Analyst. Your job is to detect deception in audio.
 
-STEP 1: AUDIO QUALITY CHECK
-- If the audio is silent, just background noise, music, or the speech is unintelligible:
-  RETURN verdict: "INCONCLUSIVE" and reason: "No clear speech detected."
+CRITICAL INSTRUCTION: SHORT CLIPS (1-5 seconds) ARE VALID.
+- If a user says "No", "Yes", or "I didn't", YOU MUST ANALYZE IT.
+- Do NOT return "INCONCLUSIVE" just because the audio is short.
+- Only return "INCONCLUSIVE" if there is absolute silence or white noise.
 
-STEP 2: DECEPTION ANALYSIS
-Analyze the following biomarkers:
-1. PITCH VOLATILITY: sudden spikes or cracks in voice.
-2. LATENCY: unusual pauses before answering.
-3. OVER-EXPLANATION: unnecessary details (a sign of fabrication).
-4. TONE: Does the emotional tone match the words?
+ANALYSIS BIOMARKERS:
+1. PITCH VOLATILITY: Micro-tremors in single words.
+2. LATENCY: Did they pause before speaking?
+3. TONE: Does the single word sound strained or breathy?
 
 OUTPUT FORMAT (JSON ONLY):
 {
     "verdict": "BLUFF" | "NO BLUFF" | "INCONCLUSIVE",
     "confidence": 0.0 to 1.0,
-    "reason": "Short, punchy verdict (Max 8 words). E.g., 'High vocal stress detected.'"
-}
-
-Be skeptical. If indicators are mixed, lean towards the stronger acoustic signal.
-"""
+    "reason": "Short, punchy verdict (Max 8 words). E.g., 'Tremor detected in pitch.'"
+}"""
 
     def _parse_verdict_response(self, text: str) -> Tuple[Verdict, float, str]:
         cleaned = text.strip()
@@ -152,10 +142,8 @@ Be skeptical. If indicators are mixed, lean towards the stronger acoustic signal
             data = json.loads(cleaned)
         except json.JSONDecodeError:
             logger.warning(f"JSON Parse Error. Raw: {text}")
-            # Fallback for emergency regex
-            return Verdict.INCONCLUSIVE, 0.0, "Analysis Error. Try Again."
+            return Verdict.INCONCLUSIVE, 0.0, "Analysis Error."
 
-        # Parse Verdict
         v_str = str(data.get("verdict", "")).upper().strip()
         
         if "INCONCLUSIVE" in v_str:
@@ -165,10 +153,11 @@ Be skeptical. If indicators are mixed, lean towards the stronger acoustic signal
         elif "BLUFF" in v_str or "LIE" in v_str:
             return Verdict.BLUFF, float(data.get("confidence", 0.9)), data.get("reason", "Deception detected.")
         
+        # Default fallback
         return Verdict.INCONCLUSIVE, 0.0, "Unclear result."
 
 # =============================================================================
-# GEMINI SERVICE (Primary - Multimodal)
+# GEMINI SERVICE (Primary)
 # =============================================================================
 
 class GeminiService(AIProvider):
@@ -181,9 +170,11 @@ class GeminiService(AIProvider):
     def name(self) -> str: return "Gemini"
     
     async def analyze_audio(self, audio_data: bytes, mime_type: str) -> AnalysisResult:
-        # Normalize MIME for Gemini
+        model_id = GEMINI_MODEL_NAME
+        if not model_id.startswith("models/"):
+            model_id = f"models/{model_id}"
+            
         gemini_mime = "audio/mp4" if "m4a" in mime_type.lower() else mime_type
-        
         audio_b64 = base64.standard_b64encode(audio_data).decode("utf-8")
         
         payload = {
@@ -194,12 +185,12 @@ class GeminiService(AIProvider):
                 ]
             }],
             "generationConfig": {
-                "temperature": 0.2, # Low temp for analytical precision
-                "response_mime_type": "application/json" # Enforce strict JSON
+                "temperature": 0.2,
+                "response_mime_type": "application/json"
             }
         }
         
-        url = f"{self.API_BASE}/{GEMINI_MODEL_NAME}:generateContent?key={self.api_key}"
+        url = f"{self.API_BASE}/{model_id}:generateContent?key={self.api_key}"
         
         try:
             response = await http_client.post(url, json=payload)
@@ -232,7 +223,6 @@ class OpenAIService(AIProvider):
     def name(self) -> str: return "OpenAI"
     
     async def analyze_audio(self, audio_data: bytes, mime_type: str) -> AnalysisResult:
-        # 1. Transcribe (Whisper)
         files = {
             "file": ("audio.m4a", audio_data, mime_type),
             "model": (None, "whisper-1"),
@@ -241,17 +231,13 @@ class OpenAIService(AIProvider):
         
         try:
             transcript_res = await http_client.post(f"{self.API_BASE}/audio/transcriptions", headers=headers, files=files)
-            
-            if transcript_res.status_code != 200:
-                raise Exception("Whisper Failed")
-                
+            if transcript_res.status_code != 200: raise Exception("Whisper Failed")
             transcript = transcript_res.json().get("text", "")
             
-            if len(transcript.strip()) < 2:
-                # Handle silence explicitly in fallback
+            # Allow single word answers (e.g. "No" is 2 chars, "I" is 1 char)
+            if len(transcript.strip()) == 0:
                 return AnalysisResult(Verdict.INCONCLUSIVE, 0.0, "No speech detected.", "OpenAI")
 
-            # 2. Analyze Text
             chat_payload = {
                 "model": "gpt-4o-mini",
                 "messages": [
@@ -288,8 +274,6 @@ class AnalysisOrchestrator:
             except Exception as e:
                 logger.warning(f"{provider.name} failed: {e}")
                 continue
-        
-        # If all fail
         raise HTTPException(503, "Service Unavailable")
 
 orchestrator = AnalysisOrchestrator()
@@ -308,21 +292,14 @@ app.add_middleware(
 )
 
 @app.post("/analyze", response_model=AnalysisResponse)
-async def analyze_endpoint(
-    file: UploadFile = File(...),
-    mime_type: str = Form(...)
-):
+async def analyze_endpoint(file: UploadFile = File(...), mime_type: str = Form(...)):
     try:
         content = await file.read()
-        if len(content) < 1000: # Simple byte check for empty files
-             return AnalysisResponse(verdict="INCONCLUSIVE", confidence=0.0, reason="Audio too short/empty.")
-             
+        # Lowered threshold to 100 bytes to allow very short/compressed clips
+        if len(content) < 100:
+             return AnalysisResponse(verdict="INCONCLUSIVE", confidence=0.0, reason="Audio empty.")
         result = await orchestrator.analyze(content, mime_type)
-        return AnalysisResponse(
-            verdict=result.verdict.value,
-            confidence=result.confidence,
-            reason=result.reason
-        )
+        return AnalysisResponse(verdict=result.verdict.value, confidence=result.confidence, reason=result.reason)
     except Exception as e:
         logger.exception("Error")
         if isinstance(e, HTTPException): raise e
