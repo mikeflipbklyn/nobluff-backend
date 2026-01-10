@@ -19,3 +19,4 @@ python-multipart==0.0.9
 
 # Pydantic for data validation
 pydantic==2.6.1
+pydantic-settings==2.1.0
