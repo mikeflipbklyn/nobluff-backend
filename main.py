@@ -85,8 +85,10 @@ class GeminiService:
     def __init__(self, api_key: str):
         self.api_key = api_key
 
-    async def analyze_audio(self, audio_data: bytes, mime_type: str) -> AnalysisResult:
-        model_id = GEMINI_MODEL_NAME if GEMINI_MODEL_NAME.startswith("models/") else f"models/{GEMINI_MODEL_NAME}"
+    async def analyze_audio(self, audio_data: bytes, mime_type: str, model_name: str = None) -> AnalysisResult:
+        # Use provided model or fall back to env default
+        model = model_name or GEMINI_MODEL_NAME
+        model_id = model if model.startswith("models/") else f"models/{model}"
         
         # Entertainment-focused prompt (avoid overclaiming accuracy)
         system_instruction = (
@@ -256,32 +258,56 @@ class NoBluffOrchestrator:
     def __init__(self):
         self.gemini = GeminiService(GOOGLE_API_KEY) if GOOGLE_API_KEY else None
         self.openai = OpenAIService(OPENAI_API_KEY) if OPENAI_API_KEY else None
+        
+        # DEFINING THE HIERARCHY
+        # 1. gemini-3-flash-preview: Highest reasoning (if available)
+        # 2. gemini-2.5-flash: The 'Fast & Intelligent' price-performance king
+        # 3. gemini-2.0-flash: Stable fallback
+        self.model_rotation = [
+            "gemini-3-flash-preview",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash"
+        ]
 
     async def run_analysis(self, audio: bytes, mime: str) -> AnalysisResult:
-        errors = []
+        if not self.gemini:
+            return await self._run_openai_fallback(audio, mime)
         
-        # Step 1: Attempt Gemini
-        if self.gemini:
+        for model in self.model_rotation:
             try:
-                return await self.gemini.analyze_audio(audio, mime)
+                logger.info(f"🔮 Analyzing via {model}...")
+                result = await self.gemini.analyze_audio(audio, mime, model_name=model)
+                logger.info(f"✅ {model} succeeded")
+                return result
             except Exception as e:
-                errors.append(f"Gemini: {str(e)[:100]}")
-                logger.warning("Gemini Core failed. Failing over to OpenAI...")
+                error_str = str(e).lower()
+                # If we hit a 429 (Too Many Requests) or quota error, rotate to next model
+                if "429" in str(e) or "quota" in error_str or "rate" in error_str:
+                    logger.warning(f"⚠️ {model} Quota/Rate Limited. Rotating to next model...")
+                    continue
+                # Also rotate on model not found errors
+                if "404" in str(e) or "not found" in error_str:
+                    logger.warning(f"⚠️ {model} not available. Rotating to next model...")
+                    continue
+                
+                logger.error(f"❌ {model} Critical Error: {e}")
+                break  # Stop rotating on auth/logic errors
+        
+        return await self._run_openai_fallback(audio, mime)
 
-        # Step 2: Fallback to OpenAI
+    async def _run_openai_fallback(self, audio: bytes, mime: str) -> AnalysisResult:
         if self.openai:
             try:
+                logger.warning("🚀 All Gemini engines offline. Engaging OpenAI Core...")
                 return await self.openai.analyze_audio(audio, mime)
             except Exception as e:
-                errors.append(f"OpenAI: {str(e)[:100]}")
-                logger.error(f"OpenAI also failed: {e}")
+                logger.error(f"💀 OpenAI fallback also failed: {e}")
         
-        # All failed
-        logger.error(f"All providers failed: {errors}")
+        # The 'Psychological Safety' result: keeps the user in the app's world
         return AnalysisResult(
             verdict=Verdict.INCONCLUSIVE,
             confidence=0.0,
-            analysis="Analysis unavailable. Please try again.",
+            analysis="System desynchronization. Please try again.",
             prosody_score=0,
             linguistic_score=0,
             provider="FailSafe"
@@ -303,7 +329,8 @@ async def health_check():
     return {
         "status": "healthy",
         "providers": providers,
-        "model": GEMINI_MODEL_NAME
+        "gemini_rotation": orchestrator.model_rotation,
+        "openai_fallback": "gpt-4o-mini + whisper-1"
     }
 
 
