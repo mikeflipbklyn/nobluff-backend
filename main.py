@@ -1,4 +1,3 @@
-
 """
 NoBluff Backend - State-of-the-Art Lie Detection
 Optimized for Gemini 3.0 Multimodal Audio Reasoning.
@@ -42,7 +41,7 @@ http_client: Optional[httpx.AsyncClient] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client
-    http_client = httpx.AsyncClient(timeout=90.0) # Increased for deep analysis
+    http_client = httpx.AsyncClient(timeout=90.0)
     logger.info("🚀 NOBLUFF AI CORE ONLINE")
     yield
     if http_client: await http_client.aclose()
@@ -52,24 +51,25 @@ async def lifespan(app: FastAPI):
 # =============================================================================
 
 class Verdict(str, Enum):
-    BLUFF = "BLUFF"
-    NO_BLUFF = "NO_BLUFF"
-    INCONCLUSIVE = "INCONCLUSIVE"
+    """Internal verdict enum - values match iOS VerdictType raw values."""
+    BLUFF = "bluff"
+    NO_BLUFF = "no_bluff"
+    INCONCLUSIVE = "inconclusive"
 
 @dataclass
 class AnalysisResult:
     verdict: Verdict
     confidence: float
-    reason: str
-    prosody_score: float # Measures vocal stress
-    linguistic_score: float # Measures cognitive load
+    analysis: str  # Changed from 'reason' to match iOS field name
+    prosody_score: float
+    linguistic_score: float
     provider: str
 
 class AnalysisResponse(BaseModel):
-    verdict: str
+    """API response - field names must match iOS Verdict.swift CodingKeys."""
+    verdict: str  # "bluff", "no_bluff", or "inconclusive" (lowercase)
     confidence: float
-    reason: str
-    analysis_depth: str = "High-Stakes Forensic"
+    analysis: str  # iOS maps this to 'reason' via CodingKeys
 
 # =============================================================================
 # GEMINI 3.0 MULTIMODAL SERVICE (Primary)
@@ -88,33 +88,30 @@ class GeminiService:
     async def analyze_audio(self, audio_data: bytes, mime_type: str) -> AnalysisResult:
         model_id = GEMINI_MODEL_NAME if GEMINI_MODEL_NAME.startswith("models/") else f"models/{GEMINI_MODEL_NAME}"
         
-        # System Instruction for "95% Confidence" Strategy
-        # We force the model to look for the "Deception Triad":
-        # 1. Pitch Jitter 2. Latency/Response Delay 3. Distancing Language
+        # Entertainment-focused prompt (avoid overclaiming accuracy)
         system_instruction = (
-            "You are a Senior Forensic Psycho-Acoustic Analyst. Your goal is 95% accuracy in deception detection. "
-            "Analyze the RAW AUDIO for: \n"
-            "1. PROSODY: Detect micro-tremors, vocal fry, or sudden pitch shifts indicative of the 'Pinocchio Effect'.\n"
-            "2. COGNITIVE LOAD: Identify unnatural pauses, over-explaining, or 'stonewalling' silence.\n"
-            "3. LINGUISTIC MARKERS: Look for distancing (avoiding 'I'), non-contracted denials, and verb tense shifts.\n"
-            "Output strictly in JSON format."
+            "You are analyzing audio for an entertainment lie detection app. "
+            "Listen for vocal patterns that might suggest stress or hesitation. "
+            "This is for fun - not forensic use. Be decisive but fair."
         )
 
         prompt = """
-        TASK: Perform a deep-tissue lie detection analysis on this clip.
+        Analyze this audio clip for signs the speaker might be bluffing.
         
-        EVALUATION CRITERIA:
-        - If the speaker sounds overly rehearsed or lacks emotional resonance: Flag as BLUFF.
-        - If the speaker exhibits 'Physiological Arousal' (breathlessness, lip smacks): Flag as BLUFF.
-        - If response is immediate, prosody is stable, and syntax is direct: Flag as NO_BLUFF.
+        Look for:
+        - Vocal hesitations or unusual pauses
+        - Changes in pitch or speaking pace
+        - Hedging language or excessive qualifiers
         
-        JSON SCHEMA:
+        If speech sounds natural and confident: no_bluff
+        If speech sounds stressed or evasive: bluff
+        If audio is unclear or too short: inconclusive
+        
+        Respond with ONLY this JSON (no markdown):
         {
-          "verdict": "BLUFF" | "NO_BLUFF" | "INCONCLUSIVE",
-          "confidence": float (0.0 to 1.0),
-          "prosody_score": float, 
-          "linguistic_score": float,
-          "reason": "Explain the exact acoustic or linguistic trigger for this verdict (max 15 words)."
+          "verdict": "bluff" or "no_bluff" or "inconclusive",
+          "confidence": 0.0 to 1.0,
+          "analysis": "Brief explanation (max 20 words)"
         }
         """
 
@@ -128,7 +125,7 @@ class GeminiService:
             }],
             "system_instruction": {"parts": [{"text": system_instruction}]},
             "generationConfig": {
-                "temperature": 0.1, # Low temperature for high precision/consistency
+                "temperature": 0.2,
                 "response_mime_type": "application/json"
             }
         }
@@ -137,20 +134,32 @@ class GeminiService:
             url = f"{self.API_BASE}/{model_id}:generateContent?key={self.api_key}"
             response = await http_client.post(url, json=payload)
             
+            if response.status_code == 429:
+                raise Exception("Rate limit exceeded")
+            
             if response.status_code != 200:
                 raise Exception(f"Gemini API Error: {response.text}")
 
             res_json = response.json()
             raw_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
             data = json.loads(raw_text)
+            
+            # Normalize verdict to lowercase
+            verdict_str = str(data.get("verdict", "inconclusive")).lower().strip()
+            if verdict_str in ("bluff",):
+                verdict = Verdict.BLUFF
+            elif verdict_str in ("no_bluff", "nobluff", "no bluff", "no-bluff"):
+                verdict = Verdict.NO_BLUFF
+            else:
+                verdict = Verdict.INCONCLUSIVE
 
             return AnalysisResult(
-                verdict=Verdict(data.get("verdict", "INCONCLUSIVE")),
-                confidence=data.get("confidence", 0.0),
-                reason=data.get("reason", "Analysis incomplete."),
+                verdict=verdict,
+                confidence=min(1.0, max(0.0, float(data.get("confidence", 0.5)))),
+                analysis=data.get("analysis", data.get("reason", "Analysis complete.")),
                 prosody_score=data.get("prosody_score", 0.0),
                 linguistic_score=data.get("linguistic_score", 0.0),
-                provider="Gemini 3.0 (Multimodal)"
+                provider="Gemini"
             )
         except Exception as e:
             logger.error(f"Gemini Processing Failure: {e}")
@@ -161,7 +170,7 @@ class GeminiService:
 # =============================================================================
 
 class OpenAIService:
-    """Fallback using Whisper-v3 and GPT-4o-Audio-Preview if available."""
+    """Fallback using Whisper and GPT-4o-mini."""
     API_BASE = "https://api.openai.com/v1"
 
     def __init__(self, api_key: str):
@@ -171,27 +180,72 @@ class OpenAIService:
         headers = {"Authorization": f"Bearer {self.api_key}"}
         
         # 1. Transcription (Whisper)
-        files = {"file": ("audio.m4a", audio_data, mime_type), "model": (None, "whisper-1")}
+        ext_map = {"audio/wav": "wav", "audio/m4a": "m4a", "audio/mp4": "m4a", "audio/mpeg": "mp3"}
+        ext = ext_map.get(mime_type, "wav")
+        files = {"file": (f"audio.{ext}", audio_data, mime_type), "model": (None, "whisper-1")}
+        
         trans_res = await http_client.post(f"{self.API_BASE}/audio/transcriptions", headers=headers, files=files)
+        
+        if trans_res.status_code != 200:
+            raise Exception(f"Whisper error: {trans_res.text[:200]}")
+            
         transcript = trans_res.json().get("text", "")
+        logger.info(f"[OpenAI] Transcript: {transcript[:100]}...")
 
-        # 2. Linguistic Analysis (GPT-4o)
-        prompt = f"Analyze this transcript for deception markers: '{transcript}'. Return JSON with verdict, confidence, and reason."
+        # 2. Analysis (GPT-4o-mini)
+        prompt = f"""Analyze this transcript for signs the speaker might be bluffing.
+        
+Transcript: "{transcript}"
+
+Look for hedging, excessive qualifiers, or evasive language.
+Respond with ONLY JSON (no markdown):
+{{"verdict": "bluff" or "no_bluff", "confidence": 0.0-1.0, "analysis": "brief explanation"}}"""
+
         chat_payload = {
-            "model": "gpt-4o",
-            "messages": [{"role": "system", "content": "You are a forensic linguist."}, {"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"}
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "You analyze speech for an entertainment app. Respond only with valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 200
         }
-        chat_res = await http_client.post(f"{self.API_BASE}/chat/completions", headers=headers, json=chat_payload)
-        data = json.loads(chat_res.json()["choices"][0]["message"]["content"])
+        
+        chat_res = await http_client.post(
+            f"{self.API_BASE}/chat/completions",
+            headers={**headers, "Content-Type": "application/json"},
+            json=chat_payload
+        )
+        
+        if chat_res.status_code != 200:
+            raise Exception(f"Chat error: {chat_res.text[:200]}")
+        
+        raw_content = chat_res.json()["choices"][0]["message"]["content"]
+        
+        # Clean markdown if present
+        cleaned = raw_content.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        
+        data = json.loads(cleaned)
+        
+        # Normalize verdict
+        verdict_str = str(data.get("verdict", "no_bluff")).lower().strip()
+        if verdict_str in ("bluff",):
+            verdict = Verdict.BLUFF
+        elif verdict_str in ("no_bluff", "nobluff", "no bluff"):
+            verdict = Verdict.NO_BLUFF
+        else:
+            verdict = Verdict.INCONCLUSIVE
 
         return AnalysisResult(
-            verdict=Verdict(data.get("verdict", "INCONCLUSIVE")),
-            confidence=data.get("confidence", 0.7), # OpenAI text-only is capped lower
-            reason=data.get("reason", "Textual analysis only."),
+            verdict=verdict,
+            confidence=min(1.0, max(0.0, float(data.get("confidence", 0.7)))),
+            analysis=data.get("analysis", data.get("reason", "Textual analysis only.")),
             prosody_score=0.5,
             linguistic_score=0.8,
-            provider="OpenAI Backup"
+            provider="OpenAI"
         )
 
 # =============================================================================
@@ -204,38 +258,75 @@ class NoBluffOrchestrator:
         self.openai = OpenAIService(OPENAI_API_KEY) if OPENAI_API_KEY else None
 
     async def run_analysis(self, audio: bytes, mime: str) -> AnalysisResult:
-        # Step 1: Attempt Gemini (Multimodal is superior for Lie Detection)
+        errors = []
+        
+        # Step 1: Attempt Gemini
         if self.gemini:
             try:
                 return await self.gemini.analyze_audio(audio, mime)
-            except Exception:
+            except Exception as e:
+                errors.append(f"Gemini: {str(e)[:100]}")
                 logger.warning("Gemini Core failed. Failing over to OpenAI...")
 
-        # Step 2: Fallback
+        # Step 2: Fallback to OpenAI
         if self.openai:
-            return await self.openai.analyze_audio(audio, mime)
-            
-        return AnalysisResult(Verdict.INCONCLUSIVE, 0.0, "No AI providers available.", 0, 0, "FailSafe")
+            try:
+                return await self.openai.analyze_audio(audio, mime)
+            except Exception as e:
+                errors.append(f"OpenAI: {str(e)[:100]}")
+                logger.error(f"OpenAI also failed: {e}")
+        
+        # All failed
+        logger.error(f"All providers failed: {errors}")
+        return AnalysisResult(
+            verdict=Verdict.INCONCLUSIVE,
+            confidence=0.0,
+            analysis="Analysis unavailable. Please try again.",
+            prosody_score=0,
+            linguistic_score=0,
+            provider="FailSafe"
+        )
 
 orchestrator = NoBluffOrchestrator()
 app = FastAPI(title="NoBluff AI", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Render.com."""
+    providers = []
+    if GOOGLE_API_KEY:
+        providers.append("Gemini")
+    if OPENAI_API_KEY:
+        providers.append("OpenAI")
+    return {
+        "status": "healthy",
+        "providers": providers,
+        "model": GEMINI_MODEL_NAME
+    }
+
+
 @app.post("/analyze", response_model=AnalysisResponse)
 async def analyze(file: UploadFile = File(...), mime_type: str = Form(...)):
-    # 1. Minimum Data Check
+    # 1. Read and validate
     content = await file.read()
-    if len(content) < 1000: # Ensure there is enough audio data to analyze prosody
-        return AnalysisResponse(verdict="INCONCLUSIVE", confidence=0.0, reason="Audio clip too short for forensic analysis.")
+    if len(content) < 1000:
+        return AnalysisResponse(
+            verdict="inconclusive",
+            confidence=0.0,
+            analysis="Audio clip too short for analysis."
+        )
 
     # 2. Run Orchestrator
     result = await orchestrator.run_analysis(content, mime_type)
     
-    # 3. Log for Data Science Review
-    logger.info(f"Verdict: {result.verdict} | Conf: {result.confidence} | Reason: {result.reason}")
+    # 3. Log
+    logger.info(f"Verdict: {result.verdict.value} | Conf: {result.confidence} | Reason: {result.analysis[:50]}")
 
+    # 4. Return iOS-compatible response
     return AnalysisResponse(
-        verdict=result.verdict.value,
+        verdict=result.verdict.value,  # Now lowercase: "bluff", "no_bluff", "inconclusive"
         confidence=result.confidence,
-        reason=result.reason
+        analysis=result.analysis  # iOS maps this to 'reason' via CodingKeys
     )
