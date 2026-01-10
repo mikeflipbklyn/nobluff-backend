@@ -1,0 +1,21 @@
+# NoBluff Backend Dependencies
+# For Render.com deployment with gunicorn
+
+# Web Framework
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+
+# Production Server
+gunicorn==21.2.0
+
+# Async HTTP Client
+httpx==0.26.0
+
+# Environment Management
+python-dotenv==1.0.1
+
+# Multipart file handling (for FastAPI)
+python-multipart==0.0.9
+
+# Pydantic for data validation
+pydantic==2.6.1
