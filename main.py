@@ -234,7 +234,7 @@ class GeminiService(AIProvider):
     """
     
     API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-    MODEL = "models/gemini-1.5-flash"
+    MODEL = "models/gemini-3-flash-preview"
     TIMEOUT = 30.0
     
     def __init__(self, api_key: str):
