@@ -2,10 +2,12 @@
 NoBluff Backend - High-Stakes Lie Detection API
 ================================================
 Production-ready FastAPI server with AI failover pattern.
-Deployed on Render.com with gunicorn.
+Deployed on Render.com.
 
-Architecture:
-    Client -> /analyze -> GeminiService -> (on failure) -> OpenAIService -> Response
+UPDATES:
+- Added "INCONCLUSIVE" state for silence/noise.
+- Enhanced System Prompt for "Forensic" accuracy.
+- Enforced Native JSON response mode for Gemini.
 """
 
 from __future__ import annotations
@@ -37,8 +39,9 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Gemini 3 Flash Preview - Latest model
-GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "models/gemini-3-flash-preview")
+# Use Gemini 1.5 Flash for speed, or Pro for max intelligence
+# Flash is recommended for real-time "viral" feel.
+GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "models/gemini-1.5-flash")
 
 # Logging configuration
 logging.basicConfig(
@@ -54,12 +57,12 @@ http_client: Optional[httpx.AsyncClient] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client
-    http_client = httpx.AsyncClient(timeout=45.0)
-    logger.info(f"NoBluff API Started | Gemini Model: {GEMINI_MODEL_NAME}")
+    http_client = httpx.AsyncClient(timeout=60.0) # Increased timeout for deep analysis
+    logger.info("Global HTTP Client Initialized")
     yield
     if http_client:
         await http_client.aclose()
-        logger.info("HTTP Client Closed")
+        logger.info("Global HTTP Client Closed")
 
 # =============================================================================
 # DOMAIN MODELS
@@ -68,16 +71,19 @@ async def lifespan(app: FastAPI):
 class Verdict(str, Enum):
     BLUFF = "BLUFF"
     NO_BLUFF = "NO BLUFF"
+    INCONCLUSIVE = "INCONCLUSIVE" # New state for silence/noise
 
 @dataclass
 class AnalysisResult:
+    """Internal result from AI provider analysis."""
     verdict: Verdict
     confidence: float
     reason: str
     provider: str
 
 class AnalysisResponse(BaseModel):
-    verdict: str = Field(..., description="BLUFF or NO BLUFF")
+    """API response schema."""
+    verdict: str = Field(..., description="BLUFF, NO BLUFF, or INCONCLUSIVE")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score 0-1")
     reason: str = Field(..., description="Punchy explanation for UI")
 
@@ -87,7 +93,7 @@ class ErrorResponse(BaseModel):
     detail: Optional[str] = None
 
 # =============================================================================
-# EXCEPTIONS
+# AI PROVIDER ABSTRACTION
 # =============================================================================
 
 class AIProviderError(Exception):
@@ -96,22 +102,6 @@ class AIProviderError(Exception):
         self.message = message
         self.retriable = retriable
         super().__init__(f"[{provider}] {message}")
-
-class RateLimitError(AIProviderError):
-    def __init__(self, provider: str):
-        super().__init__(provider, "Rate limit exceeded", retriable=True)
-
-class ServiceUnavailableError(AIProviderError):
-    def __init__(self, provider: str, detail: str = ""):
-        super().__init__(provider, f"Service unavailable: {detail}", retriable=True)
-
-class InvalidResponseError(AIProviderError):
-    def __init__(self, provider: str, detail: str = ""):
-        super().__init__(provider, f"Invalid response: {detail}", retriable=False)
-
-# =============================================================================
-# AI PROVIDER ABSTRACTION
-# =============================================================================
 
 class AIProvider(ABC):
     
@@ -125,22 +115,33 @@ class AIProvider(ABC):
         pass
     
     def _build_analysis_prompt(self) -> str:
-        return """You are 'NoBluff', a ruthless lie detector AI. Analyze the audio tone, hesitation, and stress markers.
+        """
+        ADVANCED PROMPT v2:
+        - Detects Silence/Noise
+        - Focuses on Acoustic Biomarkers (Pitch, Jitter, Latency)
+        """
+        return """You are a Forensic Psycho-Acoustic Analyst. Your job is to detect deception in audio.
 
-OUTPUT REQUIREMENTS:
-1. Verdict: 'BLUFF' (Lie/High Stress) or 'NO BLUFF' (Truth/Calm).
-2. Confidence: 0.0 to 1.0.
-3. Reason: A SHORT, PUNCHY verdict (Max 8 words). Do not be polite. Be clinical.
-   - Good: "Voice cracks detected. High stress indicators."
-   - Good: "Tone consistent. No deception found."
-   - Bad: "The speaker seems to be hesitating which might suggest..."
+STEP 1: AUDIO QUALITY CHECK
+- If the audio is silent, just background noise, music, or the speech is unintelligible:
+  RETURN verdict: "INCONCLUSIVE" and reason: "No clear speech detected."
 
-RESPONSE FORMAT (JSON ONLY):
+STEP 2: DECEPTION ANALYSIS
+Analyze the following biomarkers:
+1. PITCH VOLATILITY: sudden spikes or cracks in voice.
+2. LATENCY: unusual pauses before answering.
+3. OVER-EXPLANATION: unnecessary details (a sign of fabrication).
+4. TONE: Does the emotional tone match the words?
+
+OUTPUT FORMAT (JSON ONLY):
 {
-    "verdict": "BLUFF",
-    "confidence": 0.95,
-    "reason": "Micro-tremors detected in pitch."
-}"""
+    "verdict": "BLUFF" | "NO BLUFF" | "INCONCLUSIVE",
+    "confidence": 0.0 to 1.0,
+    "reason": "Short, punchy verdict (Max 8 words). E.g., 'High vocal stress detected.'"
+}
+
+Be skeptical. If indicators are mixed, lean towards the stronger acoustic signal.
+"""
 
     def _parse_verdict_response(self, text: str) -> Tuple[Verdict, float, str]:
         cleaned = text.strip()
@@ -150,31 +151,24 @@ RESPONSE FORMAT (JSON ONLY):
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
-            logger.warning(f"JSON Decode Failed. Attempting Regex. Raw: {text[:50]}...")
-            verdict_match = re.search(r'"verdict"\s*:\s*"(BLUFF|NO BLUFF)"', text, re.I)
-            conf_match = re.search(r'"confidence"\s*:\s*([\d.]+)', text)
-            reason_match = re.search(r'"reason"\s*:\s*"([^"]+)"', text)
-            
-            if verdict_match:
-                data = {
-                    "verdict": verdict_match.group(1).upper(),
-                    "confidence": float(conf_match.group(1)) if conf_match else 0.5,
-                    "reason": reason_match.group(1) if reason_match else "Analysis Complete."
-                }
-            else:
-                raise InvalidResponseError(self.name, "Could not parse JSON or Regex")
+            logger.warning(f"JSON Parse Error. Raw: {text}")
+            # Fallback for emergency regex
+            return Verdict.INCONCLUSIVE, 0.0, "Analysis Error. Try Again."
 
-        verdict_str = str(data.get("verdict", "")).upper().strip()
-        verdict = Verdict.BLUFF if "BLUFF" in verdict_str and "NO" not in verdict_str else Verdict.NO_BLUFF
-        if "NO" in verdict_str or "TRUTH" in verdict_str: verdict = Verdict.NO_BLUFF
+        # Parse Verdict
+        v_str = str(data.get("verdict", "")).upper().strip()
         
-        confidence = float(data.get("confidence", 0.5))
-        reason = str(data.get("reason", "Inconclusive data."))[:50]
+        if "INCONCLUSIVE" in v_str:
+            return Verdict.INCONCLUSIVE, 0.0, data.get("reason", "Audio unclear.")
+        elif "NO" in v_str or "TRUTH" in v_str:
+            return Verdict.NO_BLUFF, float(data.get("confidence", 0.9)), data.get("reason", "No deception markers.")
+        elif "BLUFF" in v_str or "LIE" in v_str:
+            return Verdict.BLUFF, float(data.get("confidence", 0.9)), data.get("reason", "Deception detected.")
         
-        return verdict, confidence, reason
+        return Verdict.INCONCLUSIVE, 0.0, "Unclear result."
 
 # =============================================================================
-# GEMINI SERVICE (Primary) - Using Gemini 3
+# GEMINI SERVICE (Primary - Multimodal)
 # =============================================================================
 
 class GeminiService(AIProvider):
@@ -187,9 +181,9 @@ class GeminiService(AIProvider):
     def name(self) -> str: return "Gemini"
     
     async def analyze_audio(self, audio_data: bytes, mime_type: str) -> AnalysisResult:
-        logger.info(f"[Gemini] Sending {len(audio_data)} bytes to {GEMINI_MODEL_NAME}")
-        
+        # Normalize MIME for Gemini
         gemini_mime = "audio/mp4" if "m4a" in mime_type.lower() else mime_type
+        
         audio_b64 = base64.standard_b64encode(audio_data).decode("utf-8")
         
         payload = {
@@ -200,8 +194,8 @@ class GeminiService(AIProvider):
                 ]
             }],
             "generationConfig": {
-                "temperature": 0.2,
-                "response_mime_type": "application/json"
+                "temperature": 0.2, # Low temp for analytical precision
+                "response_mime_type": "application/json" # Enforce strict JSON
             }
         }
         
@@ -211,25 +205,18 @@ class GeminiService(AIProvider):
             response = await http_client.post(url, json=payload)
             
             if response.status_code != 200:
-                error_text = response.text[:200]
-                logger.error(f"[Gemini] Error {response.status_code}: {error_text}")
-                if response.status_code == 429: raise RateLimitError("Gemini")
-                if response.status_code == 404:
-                    logger.error(f"[Gemini] Model not found: {GEMINI_MODEL_NAME}")
-                raise ServiceUnavailableError("Gemini", f"HTTP {response.status_code}")
+                logger.error(f"[Gemini] Error {response.status_code}: {response.text}")
+                raise Exception(f"Gemini API Error {response.status_code}")
             
             data = response.json()
-            try:
-                text = data["candidates"][0]["content"]["parts"][0]["text"]
-            except (KeyError, IndexError):
-                raise InvalidResponseError("Gemini", "Unexpected API structure")
-
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            
             verdict, confidence, reason = self._parse_verdict_response(text)
-            logger.info(f"[Gemini] Success: {verdict.value} ({confidence:.0%})")
             return AnalysisResult(verdict, confidence, reason, "Gemini")
             
-        except httpx.RequestError as e:
-            raise ServiceUnavailableError("Gemini", str(e))
+        except Exception as e:
+            logger.error(f"[Gemini] Exception: {e}")
+            raise AIProviderError("Gemini", str(e))
 
 # =============================================================================
 # OPENAI SERVICE (Backup)
@@ -245,8 +232,7 @@ class OpenAIService(AIProvider):
     def name(self) -> str: return "OpenAI"
     
     async def analyze_audio(self, audio_data: bytes, mime_type: str) -> AnalysisResult:
-        logger.info(f"[OpenAI] Transcribing {len(audio_data)} bytes")
-        
+        # 1. Transcribe (Whisper)
         files = {
             "file": ("audio.m4a", audio_data, mime_type),
             "model": (None, "whisper-1"),
@@ -254,18 +240,18 @@ class OpenAIService(AIProvider):
         headers = {"Authorization": f"Bearer {self.api_key}"}
         
         try:
-            transcript_res = await http_client.post(
-                f"{self.API_BASE}/audio/transcriptions",
-                headers=headers, files=files
-            )
+            transcript_res = await http_client.post(f"{self.API_BASE}/audio/transcriptions", headers=headers, files=files)
+            
             if transcript_res.status_code != 200:
-                raise ServiceUnavailableError("OpenAI Whisper", transcript_res.text)
-            
+                raise Exception("Whisper Failed")
+                
             transcript = transcript_res.json().get("text", "")
-            if not transcript: raise InvalidResponseError("OpenAI", "Empty transcript")
             
-            logger.info(f"[OpenAI] Transcript: {transcript[:50]}...")
-            
+            if len(transcript.strip()) < 2:
+                # Handle silence explicitly in fallback
+                return AnalysisResult(Verdict.INCONCLUSIVE, 0.0, "No speech detected.", "OpenAI")
+
+            # 2. Analyze Text
             chat_payload = {
                 "model": "gpt-4o-mini",
                 "messages": [
@@ -274,25 +260,16 @@ class OpenAIService(AIProvider):
                 ],
                 "response_format": { "type": "json_object" }
             }
+            json_headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
             
-            json_headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            chat_res = await http_client.post(
-                f"{self.API_BASE}/chat/completions",
-                headers=json_headers, json=chat_payload
-            )
-            
+            chat_res = await http_client.post(f"{self.API_BASE}/chat/completions", headers=json_headers, json=chat_payload)
             content = chat_res.json()["choices"][0]["message"]["content"]
-            verdict, confidence, reason = self._parse_verdict_response(content)
             
-            logger.info(f"[OpenAI] Success: {verdict.value} ({confidence:.0%})")
+            verdict, confidence, reason = self._parse_verdict_response(content)
             return AnalysisResult(verdict, confidence, reason, "OpenAI")
             
-        except httpx.RequestError as e:
-            raise ServiceUnavailableError("OpenAI", str(e))
+        except Exception as e:
+            raise AIProviderError("OpenAI", str(e))
 
 # =============================================================================
 # ORCHESTRATOR
@@ -303,23 +280,17 @@ class AnalysisOrchestrator:
         self.providers = []
         if GOOGLE_API_KEY: self.providers.append(GeminiService(GOOGLE_API_KEY))
         if OPENAI_API_KEY: self.providers.append(OpenAIService(OPENAI_API_KEY))
-        logger.info(f"Orchestrator initialized with {len(self.providers)} providers")
     
     async def analyze(self, audio_data: bytes, mime_type: str) -> AnalysisResult:
-        errors = []
         for provider in self.providers:
             try:
-                logger.info(f"Trying provider: {provider.name}")
                 return await provider.analyze_audio(audio_data, mime_type)
-            except AIProviderError as e:
-                logger.warning(f"Provider {provider.name} failed: {e}")
-                errors.append(f"{provider.name}: {str(e)}")
-                if not e.retriable: break
+            except Exception as e:
+                logger.warning(f"{provider.name} failed: {e}")
+                continue
         
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "Analysis failed", "providers_tried": errors}
-        )
+        # If all fail
+        raise HTTPException(503, "Service Unavailable")
 
 orchestrator = AnalysisOrchestrator()
 
@@ -327,22 +298,14 @@ orchestrator = AnalysisOrchestrator()
 # APP
 # =============================================================================
 
-app = FastAPI(title="NoBluff API", version="2.0", lifespan=lifespan)
+app = FastAPI(title="NoBluff API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST", "GET"],
+    allow_methods=["POST"],
     allow_headers=["*"],
 )
-
-@app.get("/health")
-async def health():
-    return {
-        "status": "healthy",
-        "providers": [p.name for p in orchestrator.providers],
-        "model": GEMINI_MODEL_NAME
-    }
 
 @app.post("/analyze", response_model=AnalysisResponse)
 async def analyze_endpoint(
@@ -351,19 +314,16 @@ async def analyze_endpoint(
 ):
     try:
         content = await file.read()
-        if len(content) > 25 * 1024 * 1024:
-            raise HTTPException(413, "File too large")
-        
-        logger.info(f"Received {len(content)} bytes ({mime_type})")
+        if len(content) < 1000: # Simple byte check for empty files
+             return AnalysisResponse(verdict="INCONCLUSIVE", confidence=0.0, reason="Audio too short/empty.")
+             
         result = await orchestrator.analyze(content, mime_type)
-        
         return AnalysisResponse(
             verdict=result.verdict.value,
             confidence=result.confidence,
             reason=result.reason
         )
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.exception("Unhandled error")
-        raise HTTPException(500, str(e))
+        logger.exception("Error")
+        if isinstance(e, HTTPException): raise e
+        raise HTTPException(500, "Internal Server Error")
