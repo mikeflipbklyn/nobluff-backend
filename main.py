@@ -402,7 +402,7 @@ async def analyze(request: Request, file: UploadFile = File(...), mime_type: str
         remaining = rate_limiter.get_remaining(client_ip)
         logger.warning(f"⚠️ Rate limit exceeded for {client_ip}")
         raise HTTPException(
-            status_code=429, 
+            status_code=429,
             detail=f"Rate limit exceeded. Try again in a minute. ({RATE_LIMIT_PER_MINUTE} requests/min)"
         )
     
@@ -427,3 +427,4 @@ async def analyze(request: Request, file: UploadFile = File(...), mime_type: str
         confidence=result.confidence,
         analysis=result.analysis  # iOS maps this to 'reason' via CodingKeys
     )
+
