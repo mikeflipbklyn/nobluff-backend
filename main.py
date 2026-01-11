@@ -11,7 +11,9 @@ import logging
 import os
 import json
 import re
+import time
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple, Dict, Any
@@ -19,7 +21,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -33,10 +35,53 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
+# Rate limiting: requests per minute per IP
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))  # Default 30/min
+RATE_LIMIT_WINDOW = 60  # seconds
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("nobluff")
 
 http_client: Optional[httpx.AsyncClient] = None
+
+# =============================================================================
+# RATE LIMITER
+# =============================================================================
+
+class RateLimiter:
+    """Simple in-memory rate limiter using sliding window."""
+    
+    def __init__(self, requests_per_minute: int = 30, window_seconds: int = 60):
+        self.requests_per_minute = requests_per_minute
+        self.window_seconds = window_seconds
+        self.requests: Dict[str, list] = defaultdict(list)
+    
+    def is_allowed(self, client_ip: str) -> bool:
+        """Check if request is allowed, returns True if under limit."""
+        now = time.time()
+        window_start = now - self.window_seconds
+        
+        # Clean old requests
+        self.requests[client_ip] = [
+            ts for ts in self.requests[client_ip] if ts > window_start
+        ]
+        
+        # Check limit
+        if len(self.requests[client_ip]) >= self.requests_per_minute:
+            return False
+        
+        # Record this request
+        self.requests[client_ip].append(now)
+        return True
+    
+    def get_remaining(self, client_ip: str) -> int:
+        """Get remaining requests for this IP."""
+        now = time.time()
+        window_start = now - self.window_seconds
+        recent = [ts for ts in self.requests[client_ip] if ts > window_start]
+        return max(0, self.requests_per_minute - len(recent))
+
+rate_limiter = RateLimiter(RATE_LIMIT_PER_MINUTE, RATE_LIMIT_WINDOW)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -344,12 +389,23 @@ async def health_check():
         "status": "healthy",
         "providers": providers,
         "gemini_rotation": orchestrator.model_rotation,
-        "openai_fallback": "gpt-4o-mini + whisper-1"
+        "openai_fallback": "gpt-4o-mini + whisper-1",
+        "rate_limit": f"{RATE_LIMIT_PER_MINUTE}/min"
     }
 
 
 @app.post("/analyze", response_model=AnalysisResponse)
-async def analyze(file: UploadFile = File(...), mime_type: str = Form(...)):
+async def analyze(request: Request, file: UploadFile = File(...), mime_type: str = Form(...)):
+    # 0. Rate limiting - protect backend costs
+    client_ip = request.client.host if request.client else "unknown"
+    if not rate_limiter.is_allowed(client_ip):
+        remaining = rate_limiter.get_remaining(client_ip)
+        logger.warning(f"⚠️ Rate limit exceeded for {client_ip}")
+        raise HTTPException(
+            status_code=429, 
+            detail=f"Rate limit exceeded. Try again in a minute. ({RATE_LIMIT_PER_MINUTE} requests/min)"
+        )
+    
     # 1. Read and validate
     content = await file.read()
     if len(content) < 1000:
