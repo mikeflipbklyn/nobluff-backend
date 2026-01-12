@@ -563,69 +563,105 @@ class TokenRefreshResponse(BaseModel):
     expires_in: int
 
 # =============================================================================
-# GEMINI SERVICE
+# ADVANCED GEMINI SERVICE (Forensic Level)
 # =============================================================================
 
 class GeminiService:
     API_BASE = "https://generativelanguage.googleapis.com/v1beta"
     
+    # Gemini 2.0 Flash for speed, fall back handled by orchestrator
+    DEFAULT_MODEL = "gemini-2.0-flash"
+
     def __init__(self, api_key: str):
         self.api_key = api_key
 
     async def analyze_audio(self, audio_data: bytes, mime_type: str, model_name: str = None) -> AnalysisResult:
-        model = model_name or GEMINI_MODEL_NAME
+        model = model_name or self.DEFAULT_MODEL
         model_id = model if model.startswith("models/") else f"models/{model}"
         
+        # THE PERSONA - Expert forensic analyst for consistent, analytical results
         system_instruction = (
-            "You are analyzing audio for an entertainment app. "
-            "Listen for vocal patterns that might suggest stress or hesitation. "
-            "This is for fun - not forensic use. Be decisive but fair. "
-            "IMPORTANT: If you hear multiple voices, focus on the PRIMARY SUBJECT."
+            "You are an expert Forensic Voice Analyst specializing in deception detection. "
+            "Your task is to analyze audio segments for markers of cognitive load, stress, "
+            "and psychological distancing. You analyze both the Acoustic signal (how it sounds) "
+            "and the Linguistic content (what is said). Be precise, clinical, and observant. "
+            "This is for an entertainment app - be dramatic but grounded in vocal analysis."
         )
 
+        # THE FORENSIC PROMPT - Explicit bio-acoustic markers
         prompt = """
-Analyze this audio clip for entertainment purposes.
+Analyze the provided audio for potential deception indicators using the following forensic criteria:
 
-SPEAKER RULES:
-- If multiple voices: analyze the PRIMARY SUBJECT (being questioned, loudest, clearest)
-- If vocal overlap makes isolation impossible: return inconclusive
+1. ACOUSTIC MARKERS (The Sound):
+   - Pitch Jitter: Look for sudden, unnatural spikes in vocal frequency.
+   - Intensity: Detect sudden drops in volume (mumbling) or defensive spikes.
+   - Latency: Analyze pauses before answering or mid-sentence breaks.
+   - Breathing: Audible deep breaths or shallow rapid breathing.
+   - Micro-tremors: Subtle voice wavering indicating stress.
 
-SIGNALS TO CONSIDER:
-- Vocal hesitations, pauses, pitch shifts
-- Changes in speaking pace or rhythm
-- Hedging language, excessive qualifiers
+2. LINGUISTIC MARKERS (The Words):
+   - Distancing Language: Use of "that person" instead of names, or passive voice.
+   - Hedging: Excessive use of "maybe," "I think," "to the best of my knowledge."
+   - Stalling: Repetition of the question or excessive filler words (um, uh).
+   - Over-explanation: Providing unnecessary details to seem credible.
+   - Denial patterns: Strong protests without being asked.
 
-VERDICTS:
-- "no_bluff": Speech sounds natural, confident, consistent
-- "bluff": Speech shows stress markers or evasion patterns
-- "reverse_bluff": RARE - Questioner shows stress while Subject is confident
-- "inconclusive": Audio unclear, too short, or voices too overlapped
+3. CONTEXTUAL RULES:
+   - If multiple voices exist, focus on the PRIMARY RESPONDENT (being questioned).
+   - If the audio is unintelligible or too short (<2 seconds of speech), return inconclusive.
+   - "reverse_bluff" = RARE case where the questioner shows more stress than the subject.
 
-Respond with ONLY this JSON (no markdown):
-{"verdict": "bluff" or "no_bluff" or "reverse_bluff" or "inconclusive", "confidence": 0.0 to 1.0, "analysis": "Brief explanation (max 25 words)"}
+RETURN JSON ONLY:
+{
+    "verdict": "bluff" | "no_bluff" | "reverse_bluff" | "inconclusive",
+    "confidence": 0.0 to 1.0,
+    "analysis": "A punchy 1-sentence verdict for the user (max 20 words).",
+    "forensic_breakdown": {
+        "acoustic_score": 0.0 to 1.0 (1.0 = highly suspicious acoustics),
+        "linguistic_score": 0.0 to 1.0 (1.0 = highly suspicious wording),
+        "detected_markers": ["list", "of", "specific", "observations"]
+    }
+}
 """
 
         payload = {
             "contents": [{"parts": [
-                {"inline_data": {"mime_type": "audio/mp4" if "m4a" in mime_type else mime_type,
-                                 "data": base64.standard_b64encode(audio_data).decode("utf-8")}},
+                {"inline_data": {
+                    "mime_type": "audio/mp4" if "m4a" in mime_type else mime_type,
+                    "data": base64.standard_b64encode(audio_data).decode("utf-8")
+                }},
                 {"text": prompt}
             ]}],
             "system_instruction": {"parts": [{"text": system_instruction}]},
-            "generationConfig": {"temperature": 0.2, "response_mime_type": "application/json"}
+            "generationConfig": {
+                "temperature": 0.1,  # Low temperature for analytical consistency
+                "response_mime_type": "application/json"
+            }
         }
 
         url = f"{self.API_BASE}/{model_id}:generateContent?key={self.api_key}"
-        response = await http_client.post(url, json=payload)
+        
+        # Increased timeout for deeper analysis
+        response = await http_client.post(url, json=payload, timeout=30.0)
         
         if response.status_code == 429:
             raise Exception("Rate limit exceeded")
         if response.status_code != 200:
+            logger.error(f"Gemini API Error Body: {response.text}")
             raise Exception(f"Gemini API Error: {response.status_code}")
 
         res_json = response.json()
-        raw_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
-        data = json.loads(raw_text)
+        
+        try:
+            raw_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
+            data = json.loads(raw_text)
+        except (KeyError, IndexError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to parse Gemini response: {e}")
+            return AnalysisResult(
+                verdict=Verdict.INCONCLUSIVE, confidence=0.0,
+                analysis="Analysis failed to parse.", prosody_score=0, linguistic_score=0,
+                provider="Gemini-Error"
+            )
         
         verdict_str = str(data.get("verdict", "inconclusive")).lower().strip()
         verdict_map = {
@@ -633,14 +669,29 @@ Respond with ONLY this JSON (no markdown):
             "no_bluff": Verdict.NO_BLUFF,
             "nobluff": Verdict.NO_BLUFF,
             "reverse_bluff": Verdict.REVERSE_BLUFF,
+            "inconclusive": Verdict.INCONCLUSIVE
         }
         verdict = verdict_map.get(verdict_str, Verdict.INCONCLUSIVE)
 
+        # Extract detailed forensic scores
+        forensic = data.get("forensic_breakdown", {})
+        
+        # Append markers to analysis if interesting ones detected
+        analysis_text = data.get("analysis", "Analysis complete.")
+        markers = forensic.get("detected_markers", [])
+        if markers and len(markers) > 0 and len(analysis_text) < 60:
+            # Add top 2 markers for extra drama
+            top_markers = [m for m in markers[:2] if len(m) < 30]
+            if top_markers:
+                analysis_text += f" [{', '.join(top_markers)}]"
+
         return AnalysisResult(
             verdict=verdict,
-            confidence=min(1.0, max(0.0, float(data.get("confidence", 0.75)))),
-            analysis=data.get("analysis", "No details provided."),
-            prosody_score=0.8, linguistic_score=0.8,
+            confidence=min(1.0, max(0.0, float(data.get("confidence", 0.5)))),
+            analysis=analysis_text,
+            # Map the forensic scores to your data class
+            prosody_score=float(forensic.get("acoustic_score", 0.5)),
+            linguistic_score=float(forensic.get("linguistic_score", 0.5)),
             provider=f"Gemini ({model})"
         )
 
@@ -708,7 +759,12 @@ class NoBluffOrchestrator:
     def __init__(self):
         self.gemini = GeminiService(GOOGLE_API_KEY) if GOOGLE_API_KEY else None
         self.openai = OpenAIService(OPENAI_API_KEY) if OPENAI_API_KEY else None
-        self.model_rotation = ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.0-flash"]
+        # Model rotation: try newest/fastest first, fall back to stable
+        self.model_rotation = [
+            "gemini-2.0-flash",      # Fast, stable, good audio
+            "gemini-2.5-flash",      # Newer, may have better reasoning
+            "gemini-1.5-flash",      # Fallback stable
+        ]
 
     async def run_analysis(self, audio: bytes, mime: str) -> AnalysisResult:
         if not self.gemini:
