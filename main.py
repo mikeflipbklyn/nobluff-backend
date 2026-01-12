@@ -588,7 +588,7 @@ class GeminiService:
             "This is for an entertainment app - be dramatic but grounded in vocal analysis."
         )
 
-        # THE FORENSIC PROMPT - Explicit bio-acoustic markers
+        # THE FORENSIC PROMPT - Explicit bio-acoustic markers + factual checking
         prompt = """
 Analyze the provided audio for potential deception indicators using the following forensic criteria:
 
@@ -606,7 +606,13 @@ Analyze the provided audio for potential deception indicators using the followin
    - Over-explanation: Providing unnecessary details to seem credible.
    - Denial patterns: Strong protests without being asked.
 
-3. CONTEXTUAL RULES:
+3. FACTUAL CONSISTENCY (The Truth):
+   - Cross-reference the speaker's claims against your internal world knowledge.
+   - If the speaker makes a high-profile claim that is factually incorrect (e.g., claiming a public title they do not hold, or stating an impossible fact), weight the verdict as "bluff" regardless of vocal stability.
+   - Examples: "I am the CEO of Apple" (verifiable lie), "I invented the iPhone" (impossible claim), "I won the Nobel Prize" (checkable).
+   - If a factual discrepancy is detected, mention it in the analysis.
+
+4. CONTEXTUAL RULES:
    - If multiple voices exist, focus on the PRIMARY RESPONDENT (being questioned).
    - If the audio is unintelligible or too short (<2 seconds of speech), return inconclusive.
    - "reverse_bluff" = RARE case where the questioner shows more stress than the subject.
@@ -615,10 +621,11 @@ RETURN JSON ONLY:
 {
     "verdict": "bluff" | "no_bluff" | "reverse_bluff" | "inconclusive",
     "confidence": 0.0 to 1.0,
-    "analysis": "A punchy 1-sentence verdict for the user (max 20 words).",
+    "analysis": "A punchy 1-sentence verdict for the user (max 20 words). If factual lie detected, mention the discrepancy.",
     "forensic_breakdown": {
         "acoustic_score": 0.0 to 1.0 (1.0 = highly suspicious acoustics),
         "linguistic_score": 0.0 to 1.0 (1.0 = highly suspicious wording),
+        "factual_flag": true | false (true if a factual inconsistency was detected),
         "detected_markers": ["list", "of", "specific", "observations"]
     }
 }
@@ -719,7 +726,12 @@ class OpenAIService:
 
         prompt = f"""Analyze this transcript for entertainment purposes (this is a party game).
 Transcript: "{transcript}"
-Respond with ONLY JSON: {{"verdict": "bluff" or "no_bluff", "confidence": 0.0-1.0, "analysis": "brief explanation"}}"""
+
+Check for:
+1. Linguistic deception markers (hedging, distancing, over-explanation)
+2. Factual consistency - if the speaker makes a verifiable false claim (e.g., claiming a title they don't hold), mark as bluff regardless of confidence.
+
+Respond with ONLY JSON: {{"verdict": "bluff" or "no_bluff", "confidence": 0.0-1.0, "analysis": "brief explanation (mention factual discrepancy if found)"}}"""
 
         chat_res = await http_client.post(
             f"{self.API_BASE}/chat/completions",
