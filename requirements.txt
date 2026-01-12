@@ -1,5 +1,5 @@
 # NoBluff Backend Dependencies
-# For Render.com deployment with gunicorn
+# For Render.com deployment with security features
 
 # Web Framework
 fastapi==0.109.2
@@ -14,9 +14,22 @@ httpx==0.26.0
 # Environment Management
 python-dotenv==1.0.1
 
-# Multipart file handling (for FastAPI)
+# Multipart file handling
 python-multipart==0.0.9
 
 # Pydantic for data validation
 pydantic==2.6.1
 pydantic-settings==2.1.0
+
+# =============================================================================
+# SECURITY DEPENDENCIES (App Attest & JWT Authentication)
+# =============================================================================
+
+# JWT Token handling
+PyJWT==2.8.0
+
+# Cryptography for certificate verification
+cryptography==42.0.2
+
+# CBOR parsing for App Attest objects
+cbor2==5.6.2

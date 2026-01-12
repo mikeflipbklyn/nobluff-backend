@@ -11,9 +11,50 @@ services:
     startCommand: gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
     healthCheckPath: /health
     envVars:
+      # =============================================================================
+      # AI PROVIDERS
+      # =============================================================================
       - key: GOOGLE_API_KEY
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: GEMINI_MODEL
+        value: "gemini-3-flash-preview"
+      
+      # =============================================================================
+      # SECURITY CONFIGURATION (App Attest & JWT)
+      # =============================================================================
+      
+      # JWT Secret - REQUIRED: Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+      - key: JWT_SECRET
+        sync: false
+      
+      # JWT token expiry in hours (default: 24)
+      - key: JWT_EXPIRY_HOURS
+        value: "24"
+      
+      # Apple App ID: Format is "TEAMID.com.yourcompany.appname"
+      # Find your Team ID in Apple Developer Portal > Membership
+      - key: APPLE_APP_ID
+        sync: false
+      
+      # Apple Team ID (10-character string from Apple Developer account)
+      - key: APPLE_TEAM_ID
+        sync: false
+      
+      # Set to "true" ONLY during development to bypass attestation
+      # MUST be "false" in production!
+      - key: BYPASS_ATTESTATION
+        value: "false"
+      
+      # =============================================================================
+      # RATE LIMITING
+      # =============================================================================
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "30"
+      
+      # =============================================================================
+      # RUNTIME
+      # =============================================================================
       - key: PYTHON_VERSION
         value: "3.11.7"
