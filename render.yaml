@@ -1,5 +1,10 @@
 # Render.com Blueprint Configuration
 # https://render.com/docs/blueprint-spec
+#
+# SECURITY NOTES:
+# - JWT_SECRET is REQUIRED and must be set via Render dashboard
+# - BYPASS_ATTESTATION is forced off in production (code enforced)
+# - Render automatically sets RENDER=true which triggers production mode
 
 services:
   - type: web
@@ -11,6 +16,12 @@ services:
     startCommand: gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
     healthCheckPath: /health
     envVars:
+      # =============================================================================
+      # ENVIRONMENT (Render sets this automatically, but explicit is clearer)
+      # =============================================================================
+      - key: ENVIRONMENT
+        value: "production"
+      
       # =============================================================================
       # AI PROVIDERS
       # =============================================================================
@@ -25,7 +36,9 @@ services:
       # SECURITY CONFIGURATION (App Attest & JWT)
       # =============================================================================
       
-      # JWT Secret - REQUIRED: Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+      # JWT Secret - REQUIRED IN PRODUCTION
+      # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+      # Must be at least 32 characters
       - key: JWT_SECRET
         sync: false
       
@@ -35,17 +48,20 @@ services:
       
       # Apple App ID: Format is "TEAMID.com.yourcompany.appname"
       # Find your Team ID in Apple Developer Portal > Membership
+      # REQUIRED IN PRODUCTION
       - key: APPLE_APP_ID
         sync: false
       
       # Apple Team ID (10-character string from Apple Developer account)
+      # REQUIRED IN PRODUCTION
       - key: APPLE_TEAM_ID
         sync: false
       
-      # Set to "true" ONLY during development to bypass attestation
-      # MUST be "false" in production!
-      - key: BYPASS_ATTESTATION
-        value: "false"
+      # BYPASS_ATTESTATION - DO NOT SET IN PRODUCTION
+      # The code ignores this in production environments
+      # Only set to "true" for local development
+      # - key: BYPASS_ATTESTATION
+      #   value: "false"
       
       # =============================================================================
       # RATE LIMITING
