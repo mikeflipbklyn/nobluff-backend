@@ -59,8 +59,12 @@ GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 JWT_SECRET = os.getenv("JWT_SECRET")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", "24"))
-APPLE_APP_ID = os.getenv("APPLE_APP_ID", "")  # e.g., "TEAMID.com.yourcompany.nobluff"
 APPLE_TEAM_ID = os.getenv("APPLE_TEAM_ID", "")
+APP_BUNDLE_ID = os.getenv("APP_BUNDLE_ID", "")
+# APPLE_APP_ID format: "TEAMID.bundleid" - can be set directly or built from components
+APPLE_APP_ID = os.getenv("APPLE_APP_ID", "")
+if not APPLE_APP_ID and APPLE_TEAM_ID and APP_BUNDLE_ID:
+    APPLE_APP_ID = f"{APPLE_TEAM_ID}.{APP_BUNDLE_ID}"
 
 # SECURITY: Determine if we're in production
 # Production is detected by Render's environment or explicit ENVIRONMENT var
@@ -209,7 +213,7 @@ class AppAttestVerifier:
         """Load and cache the Apple root certificate."""
         try:
             self._apple_root_cert = x509.load_pem_x509_certificate(
-                APPLE_ROOT_CA_PEM, 
+                APPLE_ROOT_CA_PEM,
                 default_backend()
             )
         except Exception as e:
@@ -229,9 +233,9 @@ class AppAttestVerifier:
             del attestation_challenges[c]
     
     async def verify_attestation(
-        self, 
-        attestation_b64: str, 
-        key_id: str, 
+        self,
+        attestation_b64: str,
+        key_id: str,
         challenge: str
     ) -> Tuple[bool, str]:
         """
@@ -304,11 +308,13 @@ class AppAttestVerifier:
             if not hmac.compare_digest(rp_id_hash, expected_rp_id):
                 return False, "RP ID hash mismatch"
             
-            # Step 8: Parse flags and verify
+            # Step 8: Parse flags
             flags = auth_data[32]
-            # Bit 0 (UP) should be set for App Attest
-            if not (flags & 0x01):
-                return False, "User presence flag not set"
+            # Note: App Attest does NOT set User Presence (UP) flag - that's for WebAuthn
+            # App Attest is automatic device attestation, no user gesture involved
+            # We only check that Attested Credential Data (AT) is present (bit 6)
+            if not (flags & 0x40):
+                return False, "Attested credential data flag not set"
             
             # Step 9: Extract credential ID and verify it matches key_id
             # authData format: rpIdHash (32) + flags (1) + signCount (4) + attestedCredData
@@ -349,8 +355,8 @@ class AppAttestVerifier:
             return False, f"Verification error"  # Don't expose internal details
     
     def _verify_certificate_chain(
-        self, 
-        leaf: x509.Certificate, 
+        self,
+        leaf: x509.Certificate,
         intermediate: x509.Certificate
     ) -> Tuple[bool, str]:
         """Verify the certificate chain up to the Apple root."""
@@ -754,6 +760,8 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 NOBLUFF AI CORE ONLINE")
     logger.info(f"🔐 Environment: {'PRODUCTION' if IS_PRODUCTION else 'DEVELOPMENT'}")
     logger.info(f"🔐 Attestation: {'ENABLED' if not BYPASS_ATTESTATION else 'BYPASSED (dev only)'}")
+    if IS_PRODUCTION and APPLE_APP_ID:
+        logger.info(f"🍎 App ID: {APPLE_APP_ID[:20]}...")
     yield
     if http_client: await http_client.aclose()
 
@@ -767,7 +775,7 @@ if IS_PRODUCTION:
 else:
     # In development, allow localhost for testing
     app.add_middleware(
-        CORSMiddleware, 
+        CORSMiddleware,
         allow_origins=["http://localhost:*", "http://127.0.0.1:*"],
         allow_methods=["GET", "POST"],
         allow_headers=["Authorization", "Content-Type"]
