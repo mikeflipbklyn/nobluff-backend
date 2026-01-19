@@ -579,54 +579,50 @@ class GeminiService:
         model = model_name or self.DEFAULT_MODEL
         model_id = model if model.startswith("models/") else f"models/{model}"
         
-        # THE PERSONA - Expert forensic analyst for consistent, analytical results
+        # THE PERSONA - Expert forensic analyst with fact-checking mandate
         system_instruction = (
-            "You are an expert Forensic Voice Analyst specializing in deception detection. "
-            "Your task is to analyze audio segments for markers of cognitive load, stress, "
-            "and psychological distancing. You analyze both the Acoustic signal (how it sounds) "
-            "and the Linguistic content (what is said). Be precise, clinical, and observant. "
-            "This is for an entertainment app - be dramatic but grounded in vocal analysis."
+            "You are an expert Forensic Voice Analyst with a specialization in identity verification "
+            "and deception detection. Your PRIMARY task is to verify any factual claims of identity "
+            "or title against your world knowledge. A calm liar is still a liar - if someone claims "
+            "to be the CEO of Apple but isn't Tim Cook, that's an automatic BLUFF with 1.0 confidence. "
+            "Secondary analysis includes acoustic markers (jitter, tremors, latency) and linguistic "
+            "patterns (hedging, distancing). This is for an entertainment app - be dramatic but accurate."
         )
 
-        # THE FORENSIC PROMPT - Explicit bio-acoustic markers + factual checking
+        # THE FORENSIC PROMPT - Hard Constraint Fact-Checking
         prompt = """
-Analyze the provided audio for potential deception indicators using the following forensic criteria:
+Analyze the provided audio for potential deception indicators using the following mandatory protocol:
 
-1. ACOUSTIC MARKERS (The Sound):
-   - Pitch Jitter: Look for sudden, unnatural spikes in vocal frequency.
-   - Intensity: Detect sudden drops in volume (mumbling) or defensive spikes.
-   - Latency: Analyze pauses before answering or mid-sentence breaks.
-   - Breathing: Audible deep breaths or shallow rapid breathing.
-   - Micro-tremors: Subtle voice wavering indicating stress.
+### STEP 1: FACTUAL IDENTITY VERIFICATION (MANDATORY) ###
+- Identify any claims of identity or title (e.g., "I am the CEO of [X]").
+- Compare the claim against your internal world knowledge. 
+- If the claim is factually false (e.g., the speaker claims to be a specific public figure they are not), this is a "VERIFICATION FAILURE."
+- A VERIFICATION FAILURE results in an automatic "bluff" verdict with 1.0 confidence, regardless of vocal stability. Sounding calm while lying is the ultimate "High-Level Bluff."
 
-2. LINGUISTIC MARKERS (The Words):
-   - Distancing Language: Use of "that person" instead of names, or passive voice.
-   - Hedging: Excessive use of "maybe," "I think," "to the best of my knowledge."
-   - Stalling: Repetition of the question or excessive filler words (um, uh).
-   - Over-explanation: Providing unnecessary details to seem credible.
-   - Denial patterns: Strong protests without being asked.
+### STEP 2: ACOUSTIC & LINGUISTIC ANALYSIS ###
+- ACOUSTIC: Jitter, tremors, latency, and breath patterns.
+- LINGUISTIC: Hedging, stalling, or distancing language.
 
-3. FACTUAL CONSISTENCY (The Truth):
-   - Cross-reference the speaker's claims against your internal world knowledge.
-   - If the speaker makes a high-profile claim that is factually incorrect (e.g., claiming a public title they do not hold, or stating an impossible fact), weight the verdict as "bluff" regardless of vocal stability.
-   - Examples: "I am the CEO of Apple" (verifiable lie), "I invented the iPhone" (impossible claim), "I won the Nobel Prize" (checkable).
-   - If a factual discrepancy is detected, mention it in the analysis.
-
-4. CONTEXTUAL RULES:
-   - If multiple voices exist, focus on the PRIMARY RESPONDENT (being questioned).
-   - If the audio is unintelligible or too short (<2 seconds of speech), return inconclusive.
-   - "reverse_bluff" = RARE case where the questioner shows more stress than the subject.
+### STEP 3: CONTEXTUAL RULES ###
+- "bluff" = Factual lie OR high vocal stress.
+- "no_bluff" = Factual truth AND low vocal stress.
+- "reverse_bluff" = Subject is truthful, but the questioner is suspiciously aggressive.
+- "inconclusive" = Audio is silent, too short (<2s), or unintelligible.
 
 RETURN JSON ONLY:
 {
+    "verification_step": {
+        "claimed_identity": "The name/title claimed in audio, or null if none",
+        "verified_truth": "The actual person holding this title/status, or null if N/A",
+        "status": "PASS" | "FAIL" | "N/A"
+    },
     "verdict": "bluff" | "no_bluff" | "reverse_bluff" | "inconclusive",
     "confidence": 0.0 to 1.0,
-    "analysis": "A punchy 1-sentence verdict for the user (max 20 words). If factual lie detected, mention the discrepancy.",
+    "analysis": "A punchy 1-sentence verdict. If status is FAIL, explicitly name the correct person.",
     "forensic_breakdown": {
         "acoustic_score": 0.0 to 1.0 (1.0 = highly suspicious acoustics),
         "linguistic_score": 0.0 to 1.0 (1.0 = highly suspicious wording),
-        "factual_flag": true | false (true if a factual inconsistency was detected),
-        "detected_markers": ["list", "of", "specific", "observations"]
+        "factual_flag": true | false (true if a factual inconsistency was detected)
     }
 }
 """
@@ -682,15 +678,18 @@ RETURN JSON ONLY:
 
         # Extract detailed forensic scores
         forensic = data.get("forensic_breakdown", {})
+        verification = data.get("verification_step", {})
         
-        # Append markers to analysis if interesting ones detected
+        # Build analysis text
         analysis_text = data.get("analysis", "Analysis complete.")
-        markers = forensic.get("detected_markers", [])
-        if markers and len(markers) > 0 and len(analysis_text) < 60:
-            # Add top 2 markers for extra drama
-            top_markers = [m for m in markers[:2] if len(m) < 30]
-            if top_markers:
-                analysis_text += f" [{', '.join(top_markers)}]"
+        
+        # If verification failed, ensure it's reflected in verdict and analysis
+        if verification.get("status") == "FAIL":
+            verdict = Verdict.BLUFF
+            claimed = verification.get("claimed_identity", "unknown")
+            actual = verification.get("verified_truth", "someone else")
+            if "FAIL" not in analysis_text and actual:
+                analysis_text = f"Identity check failed. {analysis_text}"
 
         return AnalysisResult(
             verdict=verdict,
